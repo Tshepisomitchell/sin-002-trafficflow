@@ -1,9 +1,8 @@
 package co.wethinkcode.trafficflow;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.javalin.Javalin;
 
+import javax.jms.JMSException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -19,16 +18,26 @@ public class RoutingServiceApp {
     private static final String INTERSECTION_URL =
             "http://localhost:7021/intersections/";
 
-    private static final String CONGESTION_URL =
-            "http://localhost:7022/congestion";
-
     private static final HttpClient HTTP_CLIENT =
             HttpClient.newHttpClient();
 
-    private static final ObjectMapper MAPPER =
-            new ObjectMapper();
-
     public static void main(String[] args) {
+        CongestionSubscriber subscriber;
+
+        try {
+            subscriber = new CongestionSubscriber();
+        } catch (JMSException exception) {
+            System.err.println(
+                    "Could not connect to ActiveMQ: "
+                            + exception.getMessage()
+            );
+            return;
+        }
+
+        Runtime.getRuntime().addShutdownHook(
+                new Thread(subscriber::close)
+        );
+
         Javalin app = Javalin.create().start(PORT);
 
         app.get("/health", context ->
@@ -69,8 +78,18 @@ public class RoutingServiceApp {
                     return;
                 }
 
-                int congestionLevel =
-                        fetchCongestionLevel();
+                Integer congestionLevel =
+                        subscriber.getLatestLevel();
+
+                if (congestionLevel == null) {
+                    context.status(503).json(
+                            Map.of(
+                                    "error",
+                                    "No congestion event received yet"
+                            )
+                    );
+                    return;
+                }
 
                 int estimatedMinutes =
                         15 + congestionLevel * 5;
@@ -123,30 +142,6 @@ public class RoutingServiceApp {
         }
 
         return true;
-    }
-
-    private static int fetchCongestionLevel()
-            throws Exception {
-
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(CONGESTION_URL))
-                .GET()
-                .build();
-
-        HttpResponse<String> response = HTTP_CLIENT.send(
-                request,
-                HttpResponse.BodyHandlers.ofString()
-        );
-
-        if (response.statusCode() != 200) {
-            throw new IllegalStateException(
-                    "Congestion service returned HTTP "
-                            + response.statusCode()
-            );
-        }
-
-        JsonNode json = MAPPER.readTree(response.body());
-        return json.get("level").asInt();
     }
 
     private static String normalizeId(String id) {
